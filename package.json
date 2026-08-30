@@ -1,12 +1,14 @@
 {
-  "name": "auto-finance-studio",
-  "version": "7.0.0",
+  "name": "yoho-accounting-engine",
+  "version": "9.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "typecheck": "tsc --noEmit",
     "build": "next build",
     "start": "next start"
   },
+  "engines": { "node": "24.x" },
   "dependencies": {
     "next": "latest",
     "react": "latest",
