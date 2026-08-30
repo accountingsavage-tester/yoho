@@ -9,7 +9,7 @@
     "start": "next start"
   },
   "engines": {
-    "node": ">=20 <26"
+    "node": "24.x"
   },
   "dependencies": {
     "next": "latest",
