@@ -1,1 +1,1 @@
-__CONTENT__
+export { default } from "../page";
