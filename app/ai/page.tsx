@@ -154,7 +154,7 @@ export default function AIWorkbench() {
       const context = solution ? `Current solver context: Business: ${solution.businessName || "not detected"}. Analysis: ${solution.analysis}. Journal: ${JSON.stringify(solution.journal)}` : "No solver solution is currently available.";
       const messages = [{ role: "system", content: CHAT_SYSTEM }, { role: "system", content: context }, ...next.map((m) => ({ role: m.role, content: m.text }))];
       const raw = await complete(messages, 0.2, MAX_CHAT_TOKENS);
-      setChat((x) => [...x, { role: "assistant", text: raw }].slice(-MAX_CHAT_MESSAGES));
+      setChat((x) => [...x, { role: "assistant" as const, text: raw }].slice(-MAX_CHAT_MESSAGES));
     } catch (e: any) { setError(e?.message || "Chat failed."); }
     finally { setBusy(false); setBusyStage(""); }
   }
