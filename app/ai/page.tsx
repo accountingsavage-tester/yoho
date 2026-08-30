@@ -5,19 +5,11 @@ import { CreateMLCEngine } from "@mlc-ai/web-llm";
 
 const MODEL = "Qwen2-0.5B-Instruct-q4f16_1-MLC";
 
-type Status = "idle" | "loading" | "ready" | "error";
+type Status = "idle" | "checking" | "loading" | "ready" | "error";
 type JournalLine = { account: string; debit: number; credit: number; explanation: string };
+type Solution = { analysis: string; assumptions: string[]; journal: JournalLine[]; checks: string[]; outputs: string[] };
 
-type Solution = {
-  analysis: string;
-  assumptions: string[];
-  journal: JournalLine[];
-  checks: string[];
-  outputs: string[];
-};
-
-const money = (n: number) =>
-  new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(n || 0);
+const money = (n: number) => new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(n || 0);
 
 function extractJson(text: string) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -40,6 +32,7 @@ export default function AIWorkbench() {
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState("Local model not initialized");
   const [engine, setEngine] = useState<any>(null);
+  const [gpuInfo, setGpuInfo] = useState("Not checked");
   const [problem, setProblem] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [chat, setChat] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
@@ -47,144 +40,93 @@ export default function AIWorkbench() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const total = useMemo(() => {
-    if (!solution) return { debit: 0, credit: 0 };
-    return solution.journal.reduce(
-      (a, x) => ({ debit: a.debit + Number(x.debit || 0), credit: a.credit + Number(x.credit || 0) }),
-      { debit: 0, credit: 0 }
-    );
-  }, [solution]);
+  const total = useMemo(() => solution?.journal.reduce((a, x) => ({ debit: a.debit + Number(x.debit || 0), credit: a.credit + Number(x.credit || 0) }), { debit: 0, credit: 0 }) || { debit: 0, credit: 0 }, [solution]);
 
   async function initialize() {
-    if (engine || status === "loading") return;
-    setStatus("loading");
-    setError("");
+    if (engine || status === "loading" || status === "checking") return;
+    setStatus("checking"); setError(""); setStatusText("Checking browser GPU support…");
     try {
-      const next = await CreateMLCEngine(MODEL, {
-        initProgressCallback: (p: any) => {
-          const value = Math.max(0, Math.min(100, Math.round((p?.progress || 0) * 100)));
-          setProgress(value);
-          setStatusText(p?.text || `Loading local model… ${value}%`);
-        },
-      });
-      setEngine(next);
-      setStatus("ready");
-      setProgress(100);
-      setStatusText("Local LLM ready — running in this browser");
+      const gpu = (navigator as any).gpu;
+      if (!gpu) {
+        setGpuInfo("WebGPU unavailable");
+        throw new Error("WebGPU is unavailable in this browser. WebLLM can download/cache the model, but it cannot execute it without WebGPU. Enable WebGPU or use a browser/device with GPU support.");
+      }
+      const adapter = await gpu.requestAdapter();
+      if (!adapter) {
+        setGpuInfo("No compatible GPU adapter");
+        throw new Error("No compatible GPU adapter was found. Your model may already be downloaded, but WebLLM still needs a usable GPU/WebGPU backend to run inference. Check browser hardware acceleration and GPU permissions.");
+      }
+      setGpuInfo("WebGPU adapter detected");
+      setStatus("loading"); setStatusText("Initializing local Qwen model…");
+      const next = await CreateMLCEngine(MODEL, { initProgressCallback: (p: any) => { const value = Math.max(0, Math.min(100, Math.round((p?.progress || 0) * 100))); setProgress(value); setStatusText(p?.text || `Loading local model… ${value}%`); } });
+      setEngine(next); setStatus("ready"); setProgress(100); setStatusText("Local LLM ready — running in this browser");
     } catch (e: any) {
-      setStatus("error");
-      setStatusText("Could not initialize the local model");
-      setError(e?.message || "WebGPU/WebLLM initialization failed.");
+      setStatus("error"); setStatusText("Local LLM could not start"); setError(e?.message || "WebLLM initialization failed.");
     }
   }
 
   async function complete(messages: any[], temperature = 0.1) {
     if (!engine) throw new Error("Initialize the local model first.");
-    const result = await engine.chat.completions.create({
-      messages,
-      temperature,
-      max_tokens: 1400,
-    });
+    const result = await engine.chat.completions.create({ messages, temperature, max_tokens: 1400 });
     return result?.choices?.[0]?.message?.content || "";
   }
 
   async function solve() {
     if (!problem.trim()) return setError("Enter an accounting problem first.");
-    setBusy(true);
-    setError("");
+    setBusy(true); setError("");
     try {
-      const raw = await complete([
-        { role: "system", content: SYSTEM },
-        { role: "user", content: `Solve this accounting problem:\n\n${problem.trim()}` },
-      ]);
+      const raw = await complete([{ role: "system", content: SYSTEM }, { role: "user", content: `Solve this accounting problem:\n\n${problem.trim()}` }]);
       const parsed = extractJson(raw) as Solution;
       if (!Array.isArray(parsed.journal)) throw new Error("Invalid journal returned by model.");
       const debit = parsed.journal.reduce((s, x) => s + Number(x.debit || 0), 0);
       const credit = parsed.journal.reduce((s, x) => s + Number(x.credit || 0), 0);
-      if (Math.abs(debit - credit) > 0.005) {
-        throw new Error(`Model returned an unbalanced entry (${money(debit)} Dr vs ${money(credit)} Cr).`);
-      }
+      if (Math.abs(debit - credit) > 0.005) throw new Error(`Model returned an unbalanced entry (${money(debit)} Dr vs ${money(credit)} Cr).`);
       setSolution(parsed);
-    } catch (e: any) {
-      setError(e?.message || "The accounting problem could not be solved.");
-    } finally {
-      setBusy(false);
-    }
+    } catch (e: any) { setError(e?.message || "The accounting problem could not be solved."); }
+    finally { setBusy(false); }
   }
 
   async function sendChat() {
     if (!chatInput.trim()) return;
-    const text = chatInput.trim();
-    setChatInput("");
-    setError("");
-    const next = [...chat, { role: "user" as const, text }];
-    setChat(next);
-    setBusy(true);
+    const text = chatInput.trim(); setChatInput(""); setError("");
+    const next = [...chat, { role: "user" as const, text }]; setChat(next); setBusy(true);
     try {
-      const raw = await complete([
-        { role: "system", content: "You are a concise accounting tutor. Explain journal entries, debit/credit logic, adjusting entries, and financial statements accurately. Do not fabricate facts." },
-        ...next.map((m) => ({ role: m.role, content: m.text })),
-      ], 0.2);
+      const raw = await complete([{ role: "system", content: "You are a concise accounting tutor. Explain journal entries, debit/credit logic, adjusting entries, and financial statements accurately. Do not fabricate facts." }, ...next.map((m) => ({ role: m.role, content: m.text }))], 0.2);
       setChat((x) => [...x, { role: "assistant", text: raw }]);
-    } catch (e: any) {
-      setError(e?.message || "Chat failed.");
-    } finally {
-      setBusy(false);
-    }
+    } catch (e: any) { setError(e?.message || "Chat failed."); }
+    finally { setBusy(false); }
   }
+
+  const loadingModel = status === "checking" || status === "loading";
 
   return (
     <main className="ai-shell">
-      <header className="ai-topbar">
-        <div>
-          <a href="/" className="back">← Auto Finance Studio</a>
-          <h1>AI Accounting Workbench</h1>
-          <p>Test the local LLM, then use the same reasoning engine to analyze accounting problems.</p>
-        </div>
-        <div className={`model-pill ${status}`}>
-          <span className="dot" />
-          {status === "ready" ? "LLM Ready" : status === "loading" ? "Loading LLM" : status === "error" ? "LLM Error" : "LLM Offline"}
-        </div>
+      <header className="ai-topbar glass-nav">
+        <div><a href="/" className="back">← Auto Finance Studio</a><h1>AI Accounting Workbench</h1><p>Analyze transactions, validate double-entry logic, and test the local reasoning engine before posting anything.</p></div>
+        <div className={`model-pill ${status}`}><span className="dot" />{status === "ready" ? "LLM Ready" : loadingModel ? "Preparing LLM" : status === "error" ? "Needs attention" : "LLM Offline"}</div>
       </header>
 
       <section className="ai-grid">
-        <aside className="ai-card model-card">
-          <div className="eyebrow">LOCAL MODEL</div>
-          <h2>Qwen 0.5B</h2>
-          <p className="muted">WebLLM + WebGPU. Inference runs locally in the browser; no accounting data is sent to a server.</p>
-          <div className="progress"><span style={{ width: `${progress}%` }} /></div>
-          <small>{statusText}</small>
-          <button className="primary" onClick={initialize} disabled={status === "loading" || status === "ready"}>
-            {status === "ready" ? "Model initialized" : status === "loading" ? "Initializing…" : "Initialize local LLM"}
-          </button>
+        <aside className="ai-card model-card glass-card">
+          <div className="eyebrow">LOCAL RUNTIME</div><h2>Qwen 0.5B</h2><p className="muted">The model can be downloaded and cached locally, but inference requires a working WebGPU-compatible GPU.</p>
+          {loadingModel ? <div className="skeleton-stack"><div className="skeleton sk-title"/><div className="skeleton"/><div className="skeleton"/><div className="skeleton sk-button"/></div> : <><div className="progress"><span style={{ width: `${progress}%` }} /></div><small>{statusText}</small><button className="primary interactive" onClick={initialize} disabled={status === "ready"}>{status === "ready" ? "Model initialized" : status === "error" ? "Retry local model" : "Initialize local LLM"}</button></>}
+          <div className="runtime-check"><span>GPU</span><b>{gpuInfo}</b></div>
           {error && <div className="error">{error}</div>}
           <div className="model-note"><b>Model ID</b><code>{MODEL}</code></div>
         </aside>
 
-        <section className="ai-card solver-card">
-          <div className="section-head"><div><div className="eyebrow">AUTO SOLVER</div><h2>Accounting problem → journal entry</h2></div><span className="badge">LLM + validation</span></div>
+        <section className="ai-card solver-card glass-card">
+          <div className="section-head"><div><div className="eyebrow">AUTO SOLVER</div><h2>Accounting problem → validated journal</h2></div><span className="badge">LLM + validation</span></div>
           <textarea value={problem} onChange={(e) => setProblem(e.target.value)} placeholder="Example: On March 1, the business paid ₱24,000 cash for six months of rent. Prepare the journal entry and explain the accounts." />
-          <div className="actions"><button className="primary" onClick={solve} disabled={!engine || busy}>{busy ? "Analyzing…" : "Analyze & Solve"}</button><button className="ghost" onClick={() => { setProblem(""); setSolution(null); setError(""); }}>Clear</button></div>
-
-          {solution && <div className="solution">
-            <div className="solution-head"><div><span className="badge success">Balanced</span><h3>Model analysis</h3></div><div className="totals">Dr {money(total.debit)} · Cr {money(total.credit)}</div></div>
-            <p>{solution.analysis}</p>
-            {solution.assumptions?.length > 0 && <div className="subblock"><b>Assumptions</b><ul>{solution.assumptions.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}
-            <div className="journal-table">
-              <div className="tr th"><span>Account</span><span>Debit</span><span>Credit</span><span>Why</span></div>
-              {solution.journal.map((x, i) => <div className="tr" key={i}><span>{x.account}</span><span>{x.debit ? money(Number(x.debit)) : "—"}</span><span>{x.credit ? money(Number(x.credit)) : "—"}</span><span>{x.explanation}</span></div>)}
-            </div>
-            {solution.checks?.length > 0 && <div className="subblock"><b>Checks</b><ul>{solution.checks.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}
-          </div>}
+          <div className="actions"><button className="primary interactive" onClick={solve} disabled={!engine || busy}>{busy ? "Analyzing…" : "Analyze & Solve"}</button><button className="ghost interactive" onClick={() => { setProblem(""); setSolution(null); setError(""); }}>Clear</button></div>
+          {busy && <div className="solution-skeleton"><div className="skeleton sk-title"/><div className="skeleton sk-line"/><div className="skeleton sk-line short"/><div className="skeleton-table"><div/><div/><div/><div/></div></div>}
+          {solution && !busy && <div className="solution"><div className="solution-head"><div><span className="badge success">Balanced</span><h3>Model analysis</h3></div><div className="totals">Dr {money(total.debit)} · Cr {money(total.credit)}</div></div><p>{solution.analysis}</p>{solution.assumptions?.length > 0 && <div className="subblock"><b>Assumptions</b><ul>{solution.assumptions.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}<div className="journal-table"><div className="tr th"><span>Account</span><span>Debit</span><span>Credit</span><span>Why</span></div>{solution.journal.map((x, i) => <div className="tr" key={i}><span>{x.account}</span><span>{x.debit ? money(Number(x.debit)) : "—"}</span><span>{x.credit ? money(Number(x.credit)) : "—"}</span><span>{x.explanation}</span></div>)}</div>{solution.checks?.length > 0 && <div className="subblock"><b>Checks</b><ul>{solution.checks.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}</div>}
         </section>
 
-        <section className="ai-card chat-card">
-          <div className="section-head"><div><div className="eyebrow">LLM TEST CHAT</div><h2>Talk to the model</h2></div><button className="ghost" onClick={() => setChat([])}>Clear</button></div>
-          <div className="chat-log">
-            {chat.length === 0 && <div className="empty"><strong>Test the reasoning engine</strong><span>Ask: “Why is prepaid rent an asset?” or “Explain adjusting entries.”</span></div>}
-            {chat.map((m, i) => <div key={i} className={`bubble ${m.role}`}><span className="role">{m.role === "user" ? "You" : "Local LLM"}</span><div>{m.text}</div></div>)}
-          </div>
-          <div className="chat-compose"><input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder={engine ? "Ask the accounting model…" : "Initialize the model first"} disabled={!engine || busy} /><button className="primary" onClick={sendChat} disabled={!engine || busy || !chatInput.trim()}>Send</button></div>
+        <section className="ai-card chat-card glass-card">
+          <div className="section-head"><div><div className="eyebrow">LLM TEST CHAT</div><h2>Talk to the model</h2></div><button className="ghost interactive" onClick={() => setChat([])}>Clear</button></div>
+          <div className="chat-log">{chat.length === 0 && <div className="empty"><div className="orb"/><strong>Test the reasoning engine</strong><span>Ask “Why is prepaid rent an asset?” or “Explain adjusting entries.”</span></div>}{chat.map((m, i) => <div key={i} className={`bubble ${m.role}`}><span className="role">{m.role === "user" ? "You" : "Local LLM"}</span><div>{m.text}</div></div>)}{busy && chat.length > 0 && <div className="bubble assistant"><span className="role">Local LLM</span><div className="typing"><i/><i/><i/></div></div>}</div>
+          <div className="chat-compose"><input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder={engine ? "Ask the accounting model…" : "Initialize the model first"} disabled={!engine || busy} /><button className="primary interactive" onClick={sendChat} disabled={!engine || busy || !chatInput.trim()}>Send</button></div>
         </section>
       </section>
     </main>
