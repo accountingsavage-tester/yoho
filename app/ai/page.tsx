@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
+import { loadWebLLMState, requestPersistentBrowserStorage, saveWebLLMState } from "../../lib/webllm-persistence";
 
 const MODEL = "Qwen2-0.5B-Instruct-q4f16_1-MLC";
 
@@ -33,37 +34,92 @@ export default function AIWorkbench() {
   const [statusText, setStatusText] = useState("Local model not initialized");
   const [engine, setEngine] = useState<any>(null);
   const [gpuInfo, setGpuInfo] = useState("Not checked");
+  const [storageInfo, setStorageInfo] = useState("Browser storage not checked");
   const [problem, setProblem] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [chat, setChat] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
   const [solution, setSolution] = useState<Solution | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const initializing = useRef(false);
 
   const total = useMemo(() => solution?.journal.reduce((a, x) => ({ debit: a.debit + Number(x.debit || 0), credit: a.credit + Number(x.credit || 0) }), { debit: 0, credit: 0 }) || { debit: 0, credit: 0 }, [solution]);
 
-  async function initialize() {
-    if (engine || status === "loading" || status === "checking") return;
-    setStatus("checking"); setError(""); setStatusText("Checking browser GPU support…");
+  async function initialize(auto = false) {
+    if (initializing.current || engine || status === "ready") return;
+    initializing.current = true;
+    setStatus("checking"); setError(""); setStatusText(auto ? "Restoring local model…" : "Checking browser GPU support…");
     try {
+      const previous = loadWebLLMState(MODEL);
+      if (previous && previous.status === "downloading") {
+        setProgress(previous.progress);
+        setStatusText(`Resuming model download from ${previous.progress}%…`);
+      } else if (previous?.status === "ready") {
+        setProgress(100);
+        setStatusText("Restoring cached model…");
+      }
+
       const gpu = (navigator as any).gpu;
       if (!gpu) {
         setGpuInfo("WebGPU unavailable");
-        throw new Error("WebGPU is unavailable in this browser. WebLLM can download/cache the model, but it cannot execute it without WebGPU. Enable WebGPU or use a browser/device with GPU support.");
+        setStatus("error");
+        setStatusText("Local AI unavailable on this device");
+        setError("This browser does not expose WebGPU. The model cache can remain on the device, but local inference requires a WebGPU-capable GPU.");
+        return;
       }
       const adapter = await gpu.requestAdapter();
       if (!adapter) {
         setGpuInfo("No compatible GPU adapter");
-        throw new Error("No compatible GPU adapter was found. Your model may already be downloaded, but WebLLM still needs a usable GPU/WebGPU backend to run inference. Check browser hardware acceleration and GPU permissions.");
+        setStatus("error");
+        setStatusText("Local AI unavailable on this device");
+        setError("No compatible GPU adapter was found. If the model was previously downloaded, it remains cached; this device simply cannot execute WebLLM locally.");
+        return;
       }
       setGpuInfo("WebGPU adapter detected");
-      setStatus("loading"); setStatusText("Initializing local Qwen model…");
-      const next = await CreateMLCEngine(MODEL, { initProgressCallback: (p: any) => { const value = Math.max(0, Math.min(100, Math.round((p?.progress || 0) * 100))); setProgress(value); setStatusText(p?.text || `Loading local model… ${value}%`); } });
-      setEngine(next); setStatus("ready"); setProgress(100); setStatusText("Local LLM ready — running in this browser");
+      const persistent = await requestPersistentBrowserStorage();
+      setStorageInfo(persistent ? "Persistent storage enabled" : "Browser storage available");
+      setStatus("loading");
+      saveWebLLMState({ modelId: MODEL, status: "downloading", progress: previous?.progress || 0, text: "Initializing WebLLM", updatedAt: Date.now() });
+
+      const next = await CreateMLCEngine(MODEL, {
+        initProgressCallback: (p: any) => {
+          const value = Math.max(0, Math.min(100, Math.round((p?.progress || 0) * 100)));
+          setProgress(value);
+          setStatusText(p?.text || `Downloading model assets… ${value}%`);
+          saveWebLLMState({ modelId: MODEL, status: value >= 100 ? "ready" : "downloading", progress: value, text: p?.text || "Downloading model assets", updatedAt: Date.now() });
+        },
+      });
+      setEngine(next);
+      setStatus("ready");
+      setProgress(100);
+      setStatusText("Local LLM ready — cached on this device");
+      saveWebLLMState({ modelId: MODEL, status: "ready", progress: 100, text: "Local LLM ready", updatedAt: Date.now() });
     } catch (e: any) {
-      setStatus("error"); setStatusText("Local LLM could not start"); setError(e?.message || "WebLLM initialization failed.");
+      setStatus("error");
+      setStatusText("Local LLM could not start");
+      setError(e?.message || "WebLLM initialization failed.");
+      saveWebLLMState({ modelId: MODEL, status: "error", progress, text: e?.message || "Initialization failed", updatedAt: Date.now() });
+    } finally {
+      initializing.current = false;
     }
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const saved = loadWebLLMState(MODEL);
+      if (saved) {
+        if (cancelled) return;
+        setProgress(saved.progress);
+        if (saved.status === "ready") setStatusText("Cached model found — restoring…");
+        if (saved.status === "downloading") setStatusText(`Previous download found — resuming from ${saved.progress}%…`);
+      }
+      if (!cancelled) await initialize(true);
+    })();
+    return () => { cancelled = true; };
+    // initialize is intentionally stable through the ref guard; auto-restore should run once per page mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function complete(messages: any[], temperature = 0.1) {
     if (!engine) throw new Error("Initialize the local model first.");
@@ -108,9 +164,12 @@ export default function AIWorkbench() {
 
       <section className="ai-grid">
         <aside className="ai-card model-card glass-card">
-          <div className="eyebrow">LOCAL RUNTIME</div><h2>Qwen 0.5B</h2><p className="muted">The model can be downloaded and cached locally, but inference requires a working WebGPU-compatible GPU.</p>
-          {loadingModel ? <div className="skeleton-stack"><div className="skeleton sk-title"/><div className="skeleton"/><div className="skeleton"/><div className="skeleton sk-button"/></div> : <><div className="progress"><span style={{ width: `${progress}%` }} /></div><small>{statusText}</small><button className="primary interactive" onClick={initialize} disabled={status === "ready"}>{status === "ready" ? "Model initialized" : status === "error" ? "Retry local model" : "Initialize local LLM"}</button></>}
+          <div className="eyebrow">LOCAL RUNTIME</div><h2>Qwen 0.5B</h2><p className="muted">The model is cached by WebLLM and restored automatically when you return. A compatible WebGPU adapter is still required for local inference.</p>
+          <div className="progress"><span style={{ width: `${progress}%` }} /></div>
+          <small>{statusText}</small>
+          <button className="primary interactive" onClick={() => initialize(false)} disabled={loadingModel || status === "ready"}>{status === "ready" ? "Model ready" : loadingModel ? "Preparing…" : "Initialize / resume local LLM"}</button>
           <div className="runtime-check"><span>GPU</span><b>{gpuInfo}</b></div>
+          <div className="runtime-check"><span>Storage</span><b>{storageInfo}</b></div>
           {error && <div className="error">{error}</div>}
           <div className="model-note"><b>Model ID</b><code>{MODEL}</code></div>
         </aside>
