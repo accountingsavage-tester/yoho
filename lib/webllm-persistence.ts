@@ -1,4 +1,4 @@
-export const WEBLLM_STATE_KEY = "yoho:webllm:download-state:v1";
+export const WEBLLM_STATE_KEY = "yoho:webllm:download-state:v2";
 
 export type WebLLMDownloadState = {
   modelId: string;
@@ -22,10 +22,22 @@ export function loadWebLLMState(modelId: string): WebLLMDownloadState | null {
 
 export function saveWebLLMState(state: WebLLMDownloadState) {
   if (typeof window === "undefined") return;
-  try { localStorage.setItem(WEBLLM_STATE_KEY, JSON.stringify(state)); } catch {}
+  try {
+    localStorage.setItem(WEBLLM_STATE_KEY, JSON.stringify(state));
+  } catch {}
 }
 
 export function clearWebLLMState() {
   if (typeof window === "undefined") return;
   try { localStorage.removeItem(WEBLLM_STATE_KEY); } catch {}
+}
+
+export async function requestPersistentBrowserStorage() {
+  if (typeof navigator === "undefined" || !navigator.storage?.persist) return false;
+  try { return await navigator.storage.persist(); } catch { return false; }
+}
+
+export async function isPersistentBrowserStorage() {
+  if (typeof navigator === "undefined" || !navigator.storage?.persisted) return false;
+  try { return await navigator.storage.persisted(); } catch { return false; }
 }
