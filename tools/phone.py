@@ -1,173 +1,130 @@
-"""Android/Termux control layer for JARVIS.
+from __future__ import annotations
 
-Uses Termux:API and Android's public `am` interface. No root is required.
-The LLM never receives arbitrary shell access; router calls these fixed methods.
-"""
 import json
-import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
 
-def _run(command, timeout=15, input_text=None):
-    try:
-        p = subprocess.run(command, input=input_text, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
-    except FileNotFoundError:
+def _run(command: list[str], timeout: int = 15, input_text: str | None = None) -> tuple[int, str, str]:
+    executable = shutil.which(command[0])
+    if executable is None:
         return 127, "", f"Command not found: {command[0]}"
+    command[0] = executable
+    try:
+        result = subprocess.run(command, input=input_text, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return 124, "", f"Command timed out: {command[0]}"
+    except OSError as exc:
+        return 1, "", str(exc)
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
-def _api(command, *args, timeout=15):
-    return _run([command, *map(str, args)], timeout=timeout)
+def _result(code: int, out: str, err: str, success: str, failure: str) -> str:
+    if code == 0: return success if not out else out
+    return f"{failure} {err or out}".strip()
 
 
-def _ok(code, stdout, stderr, fallback):
-    if code == 0:
-        return stdout
-    detail = stderr or stdout
-    if "not found" in detail.lower() or code == 127:
-        return f"{fallback} The required Termux command is not installed."
-    return f"{fallback} {detail}" if detail else fallback
-
-
-def battery():
-    code, out, err = _api("termux-battery-status")
-    if code != 0:
-        return _ok(code, out, err, "I couldn't read the battery status.")
+def battery() -> str:
+    code, out, err = _run(["termux-battery-status"])
+    if code: return _result(code, out, err, "", "Error: battery status unavailable.")
     try:
-        d = json.loads(out)
-        return f"Battery {d.get('percentage', '?')} percent, {str(d.get('status', 'unknown')).lower()}, {d.get('temperature', '?')} degrees Celsius."
-    except Exception:
-        return out or "Battery status unavailable."
+        d = json.loads(out); return f"Battery is {d.get('percentage', '?')}%. Status: {d.get('status', 'unknown')}. Temperature: {d.get('temperature', '?')} C."
+    except json.JSONDecodeError: return out or "Error: invalid battery response."
 
 
-def flashlight(on=None):
-    if on is None:
-        return "Tell me whether to turn the flashlight on or off."
-    value = "on" if on else "off"
-    code, out, err = _api("termux-torch", value)
-    return _ok(code, out, err, f"I couldn't turn the flashlight {value}.") or f"Flashlight {value}."
+def flashlight(on: bool) -> str:
+    code, out, err = _run(["termux-torch", "on" if on else "off"])
+    return _result(code, out, err, f"Flashlight {'on' if on else 'off'}.", "Error: could not control the flashlight.")
 
 
-def vibrate(duration_ms=1000, force=False):
-    duration_ms = max(1, min(int(duration_ms), 10000))
-    args = ["-d", duration_ms]
-    if force:
-        args.append("-f")
-    code, out, err = _api("termux-vibrate", *args)
-    return _ok(code, out, err, "I couldn't vibrate the phone.") or "Done."
+def vibrate(duration_ms: int = 1000, force: bool = False) -> str:
+    duration_ms = max(1, min(int(duration_ms), 10000)); args = ["termux-vibrate", "-d", str(duration_ms)]
+    if force: args.append("-f")
+    code, out, err = _run(args)
+    return _result(code, out, err, "Vibration complete.", "Error: could not vibrate the phone.")
 
 
-def clipboard_get():
-    code, out, err = _api("termux-clipboard-get")
-    if code != 0:
-        return _ok(code, out, err, "I couldn't read the clipboard.")
-    return out if out else "The clipboard is empty."
+def clipboard_get() -> str:
+    code, out, err = _run(["termux-clipboard-get"])
+    return out if code == 0 and out else (_result(code, out, err, "The clipboard is empty.", "Error: could not read the clipboard."))
 
 
-def clipboard_set(text):
-    if not text:
-        return "I need text to put on the clipboard."
-    code, out, err = _api("termux-clipboard-set", text)
-    return _ok(code, out, err, "I couldn't set the clipboard.") or "Copied to the clipboard."
+def clipboard_set(text: str) -> str:
+    if not text: return "Error: clipboard text is empty."
+    code, out, err = _run(["termux-clipboard-set"], input_text=text)
+    return _result(code, out, err, "Clipboard updated.", "Error: could not update the clipboard.")
 
 
-def notify(title, content):
-    code, out, err = _api("termux-notification", "-t", title, "-c", content)
-    return _ok(code, out, err, "I couldn't create the notification.") or "Notification sent."
+def notify(title: str, content: str) -> str:
+    code, out, err = _run(["termux-notification", "--title", title, "--content", content])
+    return _result(code, out, err, "Notification sent.", "Error: could not send notification.")
 
 
-def toast(message):
-    code, out, err = _api("termux-toast", message)
-    return _ok(code, out, err, "I couldn't show the Android popup.") or "Done."
+def toast(message: str) -> str:
+    code, out, err = _run(["termux-toast", message])
+    return _result(code, out, err, "Toast shown.", "Error: could not show toast.")
 
 
-def wifi_info():
-    code, out, err = _api("termux-wifi-connectioninfo")
-    if code != 0:
-        return _ok(code, out, err, "I couldn't read Wi-Fi information.")
+def wifi_info() -> str:
+    code, out, err = _run(["termux-wifi-connectioninfo"])
+    if code: return _result(code, out, err, "", "Error: Wi-Fi information unavailable.")
     try:
-        d = json.loads(out)
-        ssid = d.get("ssid") or "unknown network"
-        state = d.get("supplicant_state") or d.get("state") or "unknown"
-        ip = d.get("ip") or d.get("ip_address") or "unknown IP"
-        return f"Wi-Fi is {str(state).lower()}, network {ssid}, IP {ip}."
-    except Exception:
-        return out or "Wi-Fi information unavailable."
+        d = json.loads(out); return f"Wi-Fi network: {d.get('ssid') or 'unknown'}. IP: {d.get('ip') or d.get('ip_address') or 'unknown'}. State: {d.get('supplicant_state') or d.get('state') or 'unknown'}."
+    except json.JSONDecodeError: return out or "Error: invalid Wi-Fi response."
 
 
-def wifi(enable):
-    value = "true" if enable else "false"
-    code, out, err = _api("termux-wifi-enable", value)
-    return _ok(code, out, err, f"I couldn't turn Wi-Fi {'on' if enable else 'off'}.") or f"Wi-Fi {'on' if enable else 'off'}."
+def wifi(enable: bool) -> str:
+    code, out, err = _run(["termux-wifi-enable", "true" if enable else "false"])
+    return _result(code, out, err, f"Wi-Fi {'enabled' if enable else 'disabled'}.", "Error: could not change Wi-Fi state.")
 
 
-def location():
-    code, out, err = _api("termux-location", "-p", "network", "-r", "once", timeout=30)
-    if code != 0:
-        return _ok(code, out, err, "I couldn't get your location.")
+def location() -> str:
+    code, out, err = _run(["termux-location", "-p", "network", "-r", "once"], timeout=30)
+    if code: return _result(code, out, err, "", "Error: location unavailable.")
     try:
-        d = json.loads(out)
-        lat = d.get("latitude")
-        lon = d.get("longitude")
-        if lat is None or lon is None:
-            return "Location data was unavailable."
-        return f"Your approximate location is latitude {lat}, longitude {lon}."
-    except Exception:
-        return out or "Location unavailable."
+        d = json.loads(out); return f"Location: latitude {d.get('latitude')}, longitude {d.get('longitude')}."
+    except json.JSONDecodeError: return out or "Error: invalid location response."
 
 
-def camera_info():
-    code, out, err = _api("termux-camera-info")
-    return _ok(code, out, err, "I couldn't access camera information.") or "Camera information unavailable."
+def camera_info() -> str:
+    code, out, err = _run(["termux-camera-info"])
+    return _result(code, out, err, "Camera information unavailable.", "Error: camera information unavailable.")
 
 
-def take_photo(path=None, camera=0):
-    if path is None:
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        path = str(Path.home() / "storage" / "pictures" / f"jarvis_{stamp}.jpg")
-    path = os.path.expanduser(path)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    camera = 1 if int(camera) == 1 else 0
-    code, out, err = _api("termux-camera-photo", "-c", camera, path, timeout=30)
-    if code != 0:
-        return _ok(code, out, err, "I couldn't take the photo.")
-    return f"Photo saved to {path}."
+def take_photo(path: str | None = None, camera: int = 0) -> str:
+    target = Path(path).expanduser() if path else Path.home() / "storage" / "pictures" / f"jarvis_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    code, out, err = _run(["termux-camera-photo", "-c", str(1 if int(camera) == 1 else 0), str(target)], timeout=30)
+    return _result(code, out, err, f"Photo saved to {target}.", "Error: could not take photo.")
 
 
-def open_url(url):
-    url = url.strip()
-    if not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
+def open_url(url: str) -> str:
+    if not re.fullmatch(r"https?://[^\s]+", url, re.I): url = "https://" + url
     code, out, err = _run(["am", "start", "-a", "android.intent.action.VIEW", "-d", url])
-    return _ok(code, out, err, "I couldn't open that URL.") or "Opened it."
+    return _result(code, out, err, "Opened URL.", "Error: could not open URL.")
 
 
-def open_app(package):
-    if not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", package):
-        return "That doesn't look like a valid Android package name."
+def open_app(package: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", package): return "Error: invalid Android package name."
     code, out, err = _run(["monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"])
-    return _ok(code, out, err, f"I couldn't open {package}.") or f"Opened {package}."
+    return _result(code, out, err, f"Opened {package}.", "Error: could not open app.")
 
 
-def screen_home():
+def screen_home() -> str:
     code, out, err = _run(["am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"])
-    return _ok(code, out, err, "I couldn't return to the home screen.") or "Home screen opened."
+    return _result(code, out, err, "Home screen opened.", "Error: could not open home screen.")
 
 
-def back():
+def back() -> str:
     code, out, err = _run(["input", "keyevent", "4"])
-    return _ok(code, out, err, "I couldn't go back.") or "Done."
+    return _result(code, out, err, "Back pressed.", "Error: could not press Back.")
 
 
-def volume(stream, level):
-    allowed = {"music", "ring", "alarm", "notification", "system", "call", "voice_call"}
-    if stream not in allowed:
-        return "Unsupported volume stream."
+def volume(stream: str, level: int) -> str:
+    if stream not in {"music", "ring", "alarm", "notification", "system", "call", "voice_call"}: return "Error: unsupported volume stream."
     level = max(0, min(int(level), 100))
-    code, out, err = _api("termux-volume", stream, level)
-    return _ok(code, out, err, "I couldn't change the volume.") or f"{stream} volume set to {level}."
+    code, out, err = _run(["termux-volume", stream, str(level)])
+    return _result(code, out, err, f"{stream} volume set to {level}.", "Error: could not change volume.")

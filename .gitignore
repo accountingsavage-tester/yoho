@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+*.db
+*.db-shm
+*.db-wal
+*.gguf
+*.bin
+*.safetensors
+*.onnx
+*.wasm
+*.zip
+Termux-*.log
+.DS_Store

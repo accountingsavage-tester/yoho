@@ -6,11 +6,13 @@
   "llm_timeout": 60,
   "workspace_path": "workspace",
   "max_file_read_bytes": 1048576,
+  "max_context_messages": 20,
   "prompts": {
-    "chat": "You are Jarvis, a concise helpful assistant.",
-    "control": "You control an Android device. Choose exactly one action from the allowed actions."
+    "chat": "You are Jarvis, a concise helpful assistant running locally in Android Termux. Keep answers short and useful for text-to-speech.",
+    "control": "You control an Android device through a validated Python application. Return exactly one action line. Allowed actions: ACTION: TAP <index>, ACTION: TYPE <index> <text>, ACTION: SWIPE up|down|left|right, ACTION: KEYEVENT <numeric-code>, ACTION: HOME, ACTION: BACK, ACTION: SAY <text>. Never return shell commands, Python, arbitrary ADB commands, coordinates, or multiple actions. Select UI elements only by their displayed index. TAP requires a clickable enabled element. TYPE requires an enabled editable or focusable input element."
   },
   "memory": {
-    "db_path": "data/jarvis.db"
+    "db_path": "data/jarvis.db",
+    "recent_message_limit": 20
   }
 }
