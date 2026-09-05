@@ -1,6 +1,29 @@
-import subprocess
+import enum
 import re
+import subprocess
 import xml.etree.ElementTree as ET
+
+ADB_TIMEOUT = 10
+
+
+class ActionType(enum.Enum):
+    TAP = "TAP"
+    TYPE = "TYPE"
+    SWIPE = "SWIPE"
+    KEYEVENT = "KEYEVENT"
+    HOME = "HOME"
+    BACK = "BACK"
+    SAY = "SAY"
+
+
+class AndroidAction:
+    def __init__(self, action_type, value=""):
+        self.type = action_type
+        self.value = value
+
+
+class ActionParseError(ValueError):
+    pass
 
 
 def adb(serial, *args):
@@ -8,14 +31,24 @@ def adb(serial, *args):
     if serial:
         cmd += ["-s", serial]
     cmd += list(args)
-    return subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=ADB_TIMEOUT)
+    except FileNotFoundError as exc:
+        raise RuntimeError("adb was not found in PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ADB command timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ADB command failed")
+    return result
 
 
 def dump_ui(serial):
     adb(serial, "shell", "uiautomator", "dump", "/sdcard/ui.xml")
-    adb(serial, "pull", "/sdcard/ui.xml", "/tmp/ui.xml")
-    tree = ET.parse("/tmp/ui.xml")
-    return tree.getroot()
+    adb(serial, "pull", "/sdcard/ui.xml", "/tmp/jarvis-ui.xml")
+    try:
+        return ET.parse("/tmp/jarvis-ui.xml").getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise RuntimeError("Could not parse Android UI XML") from exc
 
 
 def parse_elements(root):
@@ -28,21 +61,21 @@ def parse_elements(root):
         label = text or desc
         if not label or not bounds:
             continue
-        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        m = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
         if not m:
             continue
         x1, y1, x2, y2 = map(int, m.groups())
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-        elements.append({"label": label, "clickable": clickable, "x": cx, "y": cy})
+        if x2 <= x1 or y2 <= y1:
+            continue
+        elements.append({"label": label[:200], "clickable": clickable, "x": (x1+x2)//2, "y": (y1+y2)//2})
     return elements
 
 
 def format_elements(elements):
-    lines = []
-    for i, el in enumerate(elements, 1):
-        tag = "clickable" if el["clickable"] else "text"
-        lines.append(str(i) + ". [" + tag + "] " + el["label"])
-    return "\n".join(lines)
+    return "\n".join(
+        f"{i}. [{'clickable' if el['clickable'] else 'text'}] {el['label']}"
+        for i, el in enumerate(elements, 1)
+    )
 
 
 def tap(serial, el):
@@ -57,12 +90,12 @@ def type_text(serial, el, text):
 
 def swipe(serial, direction):
     moves = {
-        "up": (540, 1600, 540, 400),
-        "down": (540, 400, 540, 1600),
-        "left": (900, 800, 100, 800),
-        "right": (100, 800, 900, 800),
+        "up": (540, 1600, 540, 400), "down": (540, 400, 540, 1600),
+        "left": (900, 800, 100, 800), "right": (100, 800, 900, 800),
     }
-    x1, y1, x2, y2 = moves.get(direction, moves["up"])
+    if direction not in moves:
+        raise ValueError("Invalid swipe direction")
+    x1, y1, x2, y2 = moves[direction]
     adb(serial, "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), "200")
 
 
@@ -71,7 +104,10 @@ def keyevent(serial, code):
 
 
 def parse_action(response):
-    m = re.search(r"ACTION:\s*(\w+)(.*)", response)
+    line = response.strip().splitlines()[0] if response.strip() else ""
+    m = re.fullmatch(r"ACTION:\s*(TAP|TYPE|SWIPE|KEYEVENT|HOME|BACK|SAY|DONE)(?:\s+(.*))?", line, re.I)
     if not m:
-        return None, None
-    return m.group(1).upper(), m.group(2).strip()
+        raise ActionParseError("Invalid action format")
+    action = m.group(1).upper()
+    rest = (m.group(2) or "").strip()
+    return action, rest

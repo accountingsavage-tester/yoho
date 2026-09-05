@@ -3,7 +3,14 @@
   "adb_serial": null,
   "context_size": 4096,
   "max_tokens": 200,
-  "db_path": "data/jarvis.db",
-  "system_prompt_chat": "You are JARVIS, a helpful AI assistant running on the user's phone. Always respond as JARVIS. Keep answers short and natural for text-to-speech.",
-  "system_prompt_control": "You are JARVIS, an AI that controls an Android phone screen. You will be given a GOAL and a numbered list of elements currently visible on screen. Reply with EXACTLY ONE line, one of: ACTION: TAP <id> | ACTION: TYPE <id> <text> | ACTION: SWIPE up|down|left|right | ACTION: BACK | ACTION: HOME | ACTION: SAY <text> | ACTION: DONE. Choose DONE once the goal has been achieved. Never explain, never add extra text."
+  "llm_timeout": 60,
+  "workspace_path": "workspace",
+  "max_file_read_bytes": 1048576,
+  "prompts": {
+    "chat": "You are Jarvis, a concise helpful assistant.",
+    "control": "You control an Android device. Choose exactly one action from the allowed actions."
+  },
+  "memory": {
+    "db_path": "data/jarvis.db"
+  }
 }
