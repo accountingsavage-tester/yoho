@@ -1,17 +1,12 @@
-.venv/
-venv/
+# Local configuration containing sensitive API keys and bot tokens
+config.json
+
+# Python caching
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.env
-*.db
-*.db-shm
-*.db-wal
-*.gguf
-*.bin
-*.safetensors
-*.onnx
-*.wasm
-*.zip
-Termux-*.log
+*.pyc
+*.pyo
+*.pyd
+
+# Operating system files
 .DS_Store
+Thumbs.db
