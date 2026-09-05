@@ -1,2 +1,0 @@
-UI release marker: 2026-08-30
-Premium UI layer active on main.

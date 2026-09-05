@@ -1,1 +1,0 @@
-WebLLM model weights are cached by the WebLLM/browser runtime rather than localStorage. localStorage can persist the UI state, but it cannot make an interrupted browser network request continue after a full refresh. The app should initialize the same model on each load so WebLLM can reuse its existing cache, and show recovered status separately from actual adapter readiness.
